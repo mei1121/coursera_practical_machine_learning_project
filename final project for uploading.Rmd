@@ -1,0 +1,160 @@
+ 4 models are used to predict the classes variable
+ 1st model: rpart (decision tree)
+ 2nd model: gbm (gradient boosting machines)
+ 3rd model: rf (random forecast)
+ 4th model: lasso regression with multinomial logistics regression
+ the accuracy for rpart model is only at 50% despite the fast run time (a few seconds)
+ the accuracy drastically improves with gbm and rf, the trade off is much longer run time
+ gbm accuracy is 98% and rf is 99.6%. Run time is 30 min with gbm and 3 hours for rf!
+ Lasso is also fast (a couple min) but it only improves the accuracy from 50% with rpart to 60%
+ note: this project involves a lot of data cleaning 
+ There are many covariates (features) with too many missing values
+ After eliminating covariates with too many missing, 
+ the number of covariates reduces from 160 to 55
+
+```{r}
+rm(list = ls())
+
+library(ggplot2)
+library(caret)
+library(dplyr)
+
+setwd("C:/Users/cmeil/OneDrive/Desktop/OIG")
+load("pml_training.Rdata")
+load("pml_testing.Rdata")
+
+mean(is.na(testing))
+sum(is.na(testing))
+```
+
+ find the number of missing values
+
+```{r}
+sapply(training, function(x) sum(is.na(x)))
+```
+
+ display the missing percents for each column
+
+```{r}
+percent_missing <- colMeans(is.na(training)) 
+percent_missing
+
+training2 =  training[colMeans(is.na(training)) < 0.5]
+sapply(training2, function(x) sum(is.na(x)))
+```
+
+ eliminate columns with too many missing string data
+
+```{r}
+training2 <- training2 %>% select(-contains(c('kurtosis', 'skewness',
+                                              'max_yaw','min_yaw','amplitude_yaw')))
+```
+
+ exclude columns with not helpful info
+
+```{r}
+training2 = training2[,-c(1,2,3,4,5)]
+
+training2$classe = as.factor(training2$classe)
+
+table(training2$new_window)
+table(training2$classe)
+
+set.seed(1234)
+```
+
+ create training and validation sets based on the training data
+ the initial split is training 70% , validation 30%
+ had to switch to 50% and 50% due to run time issue
+
+```{r}
+inTrain <- createDataPartition(training2$classe, p=0.5, list=FALSE)
+training3 <- training2[inTrain, ]
+validation3 <- training2[-inTrain, ]
+```
+
+ set 5-fold cross validation
+
+```{r}
+ctrl <- trainControl(method = "cv", number = 5)
+
+modTree = train(classe~.,method="rpart",data=training3,trControl = ctrl)
+modTree$finalModel
+```
+
+fancy tree plot
+
+```{r}
+library(rattle)
+fancyRpartPlot(modTree$finalModel)
+
+predTree = predict(modTree,validation3)
+confusionMatrix(predTree,validation3$classe)
+```
+
+ model 2: try GLM (does not work because it only supports 2-class outcomes)
+modGlm = train(classe~.,method="glm",data=training3,trControl = ctrl)
+ model 3: try random forecast (run time 3 hours!!!)
+ accuracy is 99.6%
+
+```{r}
+library(randomForest)
+modRf = train(classe~.,method="rf",data=training3)
+save(modRf,file="modRf.Rdata")
+predRf = predict(modRf,validation3 )
+confusionMatrix(predRf,validation3$classe)
+```
+
+ model 4: gradient boosting model (about 30 min run time)
+ accuracy increases to 98% from 50%
+
+```{r}
+modGBM = train(classe~.,method="gbm",data=training3, verbose = FALSE)
+modGBM$results
+predGBM = predict(modGBM,validation3)
+confusionMatrix(predGBM,validation3$classe)
+save(modGBM,file="modGBM.Rdata")
+```
+
+ try lasso to eliminate some variables
+ fit a lasso multinomial regression model
+
+```{r}
+library(glmnet)
+x = training3[,-c(55)]
+y = training3$classe
+modLasso = glmnet(x,y,family="multinomial",alpha=1)
+```
+
+ use cross validation to choose the best lambda
+
+```{r}
+x = as.matrix(x)
+cv_modLasso = cv.glmnet(x,y,family="multinomial",alpha=1)
+cv_modLasso$lambda
+cv_modLasso$lambda.min
+best_lambda = cv_modLasso$lambda.min
+plot(cv_modLasso)
+```
+
+ predict class labels for Lasso regression and calculate prediction accuracy
+ the accuracy is only at 61%, better than rpart but worse than GBM or RF
+ key arguments in predict function: s is the value of lambda to use for prediction
+ newx is the new data matrix where predictions are to be made
+
+```{r}
+x_validation = validation3[,-c(55)]
+x_validation = as.matrix(x_validation)
+predLasso = predict(cv_modLasso,newx=x_validation,s="lambda.min",type="class")
+predLasso = as.factor(predLasso)
+table(predLasso)
+confusionMatrix(predLasso,validation3$classe)
+```
+
+ once the best lambda is selected, we can extract the beta coefficients 
+ for this lambda using the coef() function
+
+```{r}
+final_betas = coef(cv_modLasso, s = "lambda.min")
+```
+
